@@ -1,0 +1,11 @@
+version: "3.9"
+
+services:
+  bet-ai-odds:
+    build: .
+    container_name: bet-ai-odds
+    ports:
+      - "8501:8501"
+    env_file:
+      - .env
+    restart: unless-stopped

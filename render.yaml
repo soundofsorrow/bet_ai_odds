@@ -1,0 +1,19 @@
+services:
+  - type: web
+    name: bet-ai-odds
+    runtime: python
+    plan: free
+    buildCommand: pip install -U pip setuptools wheel && pip install -r requirements.txt
+    startCommand: streamlit run app.py --server.address=0.0.0.0 --server.port=$PORT
+    autoDeploy: true
+    envVars:
+      - key: ODDS_API_KEY
+        sync: false
+      - key: FOOTBALL_DATA_API_KEY
+        sync: false
+      - key: REGION
+        value: eu
+      - key: APP_PASSWORD
+        sync: false
+      - key: REQUIRE_USER_KEYS
+        value: "true"

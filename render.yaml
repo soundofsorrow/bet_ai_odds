@@ -2,7 +2,7 @@ services:
   - type: web
     name: bet-ai-odds
     runtime: python
-    plan: free
+    plan: starter
     buildCommand: pip install -U pip setuptools wheel && pip install -r requirements.txt
     startCommand: streamlit run app.py --server.address=0.0.0.0 --server.port=$PORT
     autoDeploy: true
@@ -17,3 +17,101 @@ services:
         sync: false
       - key: REQUIRE_USER_KEYS
         value: "true"
+      - key: TELEGRAM_BOT_TOKEN
+        sync: false
+      - key: TELEGRAM_ADMIN_IDS
+        sync: false
+      - key: TELEGRAM_PRIVATE_GROUP_ID
+        sync: false
+      - key: TELEGRAM_THEME
+        value: gold
+      - key: TELEGRAM_CARD_MODE
+        value: dual
+      - key: TELEGRAM_INCLUDE_PROOF
+        value: "true"
+      - key: TELEGRAM_PROOF_LIMIT
+        value: "30"
+      - key: TELEGRAM_INCLUDE_WEEKLY
+        value: "true"
+      - key: TELEGRAM_WEEKLY_SUMMARY_DAY
+        value: "0"
+      - key: TELEGRAM_SEND_TIME
+        value: "10:00"
+      - key: TELEGRAM_TZ
+        value: Europe/Istanbul
+      - key: TELEGRAM_PAYMENT_FEE_TL
+        value: "500"
+      - key: TELEGRAM_CONTACT
+        sync: false
+
+  - type: worker
+    name: bet-ai-odds-bot
+    runtime: python
+    plan: starter
+    buildCommand: pip install -U pip setuptools wheel && pip install -r requirements.txt
+    startCommand: python3 telegram_bot.py --mode bot
+    autoDeploy: true
+    envVars:
+      - key: ODDS_API_KEY
+        sync: false
+      - key: FOOTBALL_DATA_API_KEY
+        sync: false
+      - key: REGION
+        value: eu
+      - key: TELEGRAM_BOT_TOKEN
+        sync: false
+      - key: TELEGRAM_ADMIN_IDS
+        sync: false
+      - key: TELEGRAM_PRIVATE_GROUP_ID
+        sync: false
+      - key: TELEGRAM_PAYMENT_FEE_TL
+        value: "500"
+      - key: TELEGRAM_CONTACT
+        sync: false
+      - key: TELEGRAM_AUTO_INVITE_LINK
+        value: "true"
+      - key: TELEGRAM_ACCESS_DB
+        value: data/telegram_access.db
+      - key: DB_PATH
+        value: data/coupon_history.db
+
+  - type: worker
+    name: bet-ai-odds-daily
+    runtime: python
+    plan: starter
+    buildCommand: pip install -U pip setuptools wheel && pip install -r requirements.txt
+    startCommand: python3 telegram_bot.py --mode daily
+    autoDeploy: true
+    envVars:
+      - key: ODDS_API_KEY
+        sync: false
+      - key: FOOTBALL_DATA_API_KEY
+        sync: false
+      - key: REGION
+        value: eu
+      - key: TELEGRAM_BOT_TOKEN
+        sync: false
+      - key: TELEGRAM_ADMIN_IDS
+        sync: false
+      - key: TELEGRAM_PRIVATE_GROUP_ID
+        sync: false
+      - key: TELEGRAM_THEME
+        value: gold
+      - key: TELEGRAM_CARD_MODE
+        value: dual
+      - key: TELEGRAM_INCLUDE_PROOF
+        value: "true"
+      - key: TELEGRAM_PROOF_LIMIT
+        value: "30"
+      - key: TELEGRAM_INCLUDE_WEEKLY
+        value: "true"
+      - key: TELEGRAM_WEEKLY_SUMMARY_DAY
+        value: "0"
+      - key: TELEGRAM_SEND_TIME
+        value: "10:00"
+      - key: TELEGRAM_TZ
+        value: Europe/Istanbul
+      - key: TELEGRAM_ACCESS_DB
+        value: data/telegram_access.db
+      - key: DB_PATH
+        value: data/coupon_history.db

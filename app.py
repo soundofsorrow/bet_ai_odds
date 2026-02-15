@@ -1357,6 +1357,7 @@ def save_coupon(
     run_id = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S%f")
     created_at = datetime.now(timezone.utc).isoformat()
     conn = sqlite3.connect(db_path)
+    leg_cols = {r[1] for r in conn.execute("PRAGMA table_info(bet_legs)").fetchall()}
     conn.execute(
         """
         INSERT INTO coupon_history (
@@ -1379,32 +1380,28 @@ def save_coupon(
     )
     for p in picks:
         pred_hg, pred_ag = parse_score_pred(p.get("score_pred"))
-        conn.execute(
-            """
-            INSERT INTO bet_legs (
-                run_id, created_at, profile_key, league, home, away, kickoff,
-                market_key, bet_text, odd_open, model_prob, pred_home_goals, pred_away_goals,
-                pred_iyms, is_played, settled
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0)
-            """,
-            (
-                run_id,
-                created_at,
-                profile.key,
-                p["league"],
-                p["home"],
-                p["away"],
-                p["commence"],
-                p["market_key"],
-                p["pick"],
-                float(p["odd"]),
-                float(p["model_prob"]),
-                pred_hg,
-                pred_ag,
-                str(p.get("iyms_pred") or ""),
-                1 if is_played else 0,
-            ),
-        )
+        leg_data = {
+            "run_id": run_id,
+            "created_at": created_at,
+            "profile_key": profile.key,
+            "league": p["league"],
+            "home": p["home"],
+            "away": p["away"],
+            "kickoff": p["commence"],
+            "market_key": p["market_key"],
+            "bet_text": p["pick"],
+            "odd_open": float(p["odd"]),
+            "model_prob": float(p["model_prob"]),
+            "pred_home_goals": pred_hg,
+            "pred_away_goals": pred_ag,
+            "pred_iyms": str(p.get("iyms_pred") or ""),
+            "is_played": 1 if is_played else 0,
+            "settled": 0,
+        }
+        insert_cols = [k for k in leg_data.keys() if k in leg_cols]
+        placeholders = ", ".join(["?"] * len(insert_cols))
+        sql = f"INSERT INTO bet_legs ({', '.join(insert_cols)}) VALUES ({placeholders})"
+        conn.execute(sql, tuple(leg_data[c] for c in insert_cols))
         conn.execute(
             """
             INSERT INTO odds_snapshots (
@@ -1652,6 +1649,79 @@ def load_settled_performance(db_path: Path, played_only: bool = False) -> Dict[s
         "score_mae": float(score_mae or 0.0),
         "iyms_hit_rate": float(iyms_hit_rate or 0.0),
     }
+
+
+def load_score_mastery_leaderboard(
+    db_path: Path,
+    played_only: bool = True,
+    min_samples: int = 12,
+    limit: int = 6,
+) -> List[Dict[str, Any]]:
+    if not db_path.exists():
+        return []
+    conn = sqlite3.connect(db_path)
+    filter_sql = "AND is_played = 1" if played_only else ""
+    rows = conn.execute(
+        """
+        SELECT
+            market_key,
+            COUNT(*) AS n,
+            AVG(CASE WHEN won = 1 THEN 1.0 ELSE 0.0 END) AS hit_rate,
+            AVG(CASE WHEN won = 1 THEN odd_open - 1.0 ELSE -1.0 END) AS avg_roi,
+            AVG(score_abs_error) AS score_mae,
+            AVG(CASE WHEN iyms_hit IS NOT NULL THEN iyms_hit END) AS iyms_hit_rate
+        FROM bet_legs
+        WHERE settled = 1
+        """
+        + f" {filter_sql}"
+        + """
+        GROUP BY market_key
+        """
+    ).fetchall()
+    conn.close()
+
+    out: List[Dict[str, Any]] = []
+    for market_key, n, hit_rate, avg_roi, score_mae, iyms_hit_rate in rows:
+        n_i = int(n or 0)
+        if n_i < int(min_samples):
+            continue
+        hit = float(hit_rate or 0.0)
+        roi = float(avg_roi or 0.0)
+        mae = float(score_mae or 0.0)
+        iy = float(iyms_hit_rate or 0.0)
+        mae_score = clamp(1.0 - (mae / 2.6), 0.0, 1.0)
+        roi_score = clamp((roi + 0.40) / 1.20, 0.0, 1.0)
+        sample_score = clamp(n_i / 120.0, 0.15, 1.0)
+        mastery = (
+            (0.33 * hit)
+            + (0.22 * iy)
+            + (0.23 * mae_score)
+            + (0.14 * roi_score)
+            + (0.08 * sample_score)
+        )
+        out.append(
+            {
+                "market_key": str(market_key or "-"),
+                "n": n_i,
+                "hit_rate": hit,
+                "avg_roi": roi,
+                "score_mae": mae,
+                "iyms_hit_rate": iy,
+                "mae_score": mae_score,
+                "mastery_score": float(mastery),
+            }
+        )
+
+    out.sort(
+        key=lambda r: (
+            float(r["mastery_score"]),
+            float(r["hit_rate"]),
+            float(r["iyms_hit_rate"]),
+            -float(r["score_mae"]),
+        ),
+        reverse=True,
+    )
+    return out[: max(1, int(limit))]
 
 
 def load_calibration_bins(db_path: Path, bins: int = 10, prefer_played: bool = True) -> List[Tuple[float, float, float]]:

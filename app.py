@@ -1,4 +1,5 @@
 import json
+import io
 import math
 import os
 import random
@@ -8,7 +9,7 @@ import time
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 import numpy as np
 import pandas as pd
@@ -94,6 +95,11 @@ MARKET_TR = {
     "h2h": "MS",
     "totals": "Alt/Ust",
     "btts": "KG",
+}
+
+DEFAULT_ADAPTIVE_WEIGHTS = {
+    "market_factor": {"h2h": 1.0, "totals": 1.0, "btts": 1.0},
+    "odd_bucket_factor": {"low": 1.0, "mid": 1.0, "high": 1.0},
 }
 
 STOPWORDS = {
@@ -442,12 +448,42 @@ def summarize_conditioned_predictions(
     return score_pred, iyms_pred, score_top3, iyms_top3, consistency_prob, score_pred_prob, iyms_pred_prob
 
 
-def safe_get(url: str, params: Optional[dict] = None, headers: Optional[dict] = None, timeout: int = 25) -> dict:
-    response = requests.get(url, params=params, headers=headers, timeout=timeout)
-    if response.status_code != 200:
+def safe_get(
+    url: str,
+    params: Optional[dict] = None,
+    headers: Optional[dict] = None,
+    timeout: int = 25,
+    max_retries: int = 3,
+) -> dict:
+    last_error: Optional[requests.HTTPError] = None
+    for attempt in range(max_retries + 1):
+        response = requests.get(url, params=params, headers=headers, timeout=timeout)
+        if response.status_code == 200:
+            return response.json()
+
         body = response.text[:250]
-        raise requests.HTTPError(f"HTTP {response.status_code} - {body}", response=response)
-    return response.json()
+        err = requests.HTTPError(f"HTTP {response.status_code} - {body}", response=response)
+        last_error = err
+
+        # The Odds API can return temporary 429 with "Wait N seconds".
+        if response.status_code == 429 and attempt < max_retries:
+            retry_after = response.headers.get("Retry-After", "").strip()
+            wait_sec = 0
+            if retry_after.isdigit():
+                wait_sec = int(retry_after)
+            else:
+                m = re.search(r"wait\s+(\d+)\s+seconds", response.text.lower())
+                if m:
+                    wait_sec = int(m.group(1))
+            wait_sec = max(2, min(wait_sec or 8, 75))
+            time.sleep(wait_sec)
+            continue
+
+        raise err
+
+    if last_error is not None:
+        raise last_error
+    raise requests.HTTPError("HTTP request failed")
 
 
 def parse_iso_dt(iso_text: str) -> Optional[datetime]:
@@ -1228,6 +1264,7 @@ def init_db(db_path: Path) -> None:
             bet_text TEXT NOT NULL,
             odd_open REAL NOT NULL,
             model_prob REAL NOT NULL,
+            is_played INTEGER NOT NULL DEFAULT 0,
             settled INTEGER NOT NULL DEFAULT 0,
             won INTEGER,
             home_goals INTEGER,
@@ -1260,11 +1297,32 @@ def init_db(db_path: Path) -> None:
         )
         """
     )
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS model_weights (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            created_at TEXT NOT NULL,
+            settled_count INTEGER NOT NULL,
+            weights_json TEXT NOT NULL
+        )
+        """
+    )
+    # Lightweight migrations for existing databases.
+    cols = [r[1] for r in conn.execute("PRAGMA table_info(bet_legs)").fetchall()]
+    if "is_played" not in cols:
+        conn.execute("ALTER TABLE bet_legs ADD COLUMN is_played INTEGER NOT NULL DEFAULT 0")
     conn.commit()
     conn.close()
 
 
-def save_coupon(db_path: Path, profile: CouponProfile, picks: List[dict], total_odd: float, metrics: Dict[str, float]) -> None:
+def save_coupon(
+    db_path: Path,
+    profile: CouponProfile,
+    picks: List[dict],
+    total_odd: float,
+    metrics: Dict[str, float],
+    is_played: bool = False,
+) -> None:
     if not picks:
         return
     payload = [
@@ -1309,8 +1367,8 @@ def save_coupon(db_path: Path, profile: CouponProfile, picks: List[dict], total_
             """
             INSERT INTO bet_legs (
                 run_id, created_at, profile_key, league, home, away, kickoff,
-                market_key, bet_text, odd_open, model_prob, settled
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0)
+                market_key, bet_text, odd_open, model_prob, is_played, settled
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0)
             """,
             (
                 run_id,
@@ -1324,6 +1382,7 @@ def save_coupon(db_path: Path, profile: CouponProfile, picks: List[dict], total_
                 p["pick"],
                 float(p["odd"]),
                 float(p["model_prob"]),
+                1 if is_played else 0,
             ),
         )
         conn.execute(
@@ -1394,12 +1453,21 @@ def leg_won(market_key: str, pick_text: str, home: str, away: str, hg: int, ag: 
     return False
 
 
-def fetch_finished_matches_by_competitions(football_data_key: str, comp_codes: List[str], days_back: int = 7) -> Dict[str, tuple]:
+def parse_dt_utc(value: str) -> Optional[datetime]:
+    if not value:
+        return None
+    try:
+        return datetime.fromisoformat(value.replace("Z", "+00:00")).astimezone(timezone.utc)
+    except Exception:
+        return None
+
+
+def fetch_finished_matches_by_competitions(football_data_key: str, comp_codes: List[str], days_back: int = 7) -> List[dict]:
     headers = {"X-Auth-Token": football_data_key}
     now = datetime.now(timezone.utc)
     date_from = (now - timedelta(days=days_back)).date().isoformat()
     date_to = now.date().isoformat()
-    out: Dict[str, tuple] = {}
+    out: List[dict] = []
     for code in comp_codes:
         try:
             data = safe_get(
@@ -1415,8 +1483,16 @@ def fetch_finished_matches_by_competitions(football_data_key: str, comp_codes: L
             ft = (m.get("score") or {}).get("fullTime") or {}
             hg = int(ft.get("home", 0) or 0)
             ag = int(ft.get("away", 0) or 0)
-            key = f"{normalize_team_name(ht)}__{normalize_team_name(at)}"
-            out[key] = (hg, ag)
+            utc_date = str(m.get("utcDate") or "")
+            out.append(
+                {
+                    "home_n": normalize_team_name(ht),
+                    "away_n": normalize_team_name(at),
+                    "utc_date": utc_date,
+                    "hg": hg,
+                    "ag": ag,
+                }
+            )
     return out
 
 
@@ -1440,8 +1516,8 @@ def settle_open_legs(
     if not football_data_key:
         return 0
     comp_codes = sorted({LEAGUES[k]["fd_comp"] for k in leagues if k in LEAGUES})
-    finished_map = fetch_finished_matches_by_competitions(football_data_key, comp_codes, days_back=10)
-    if not finished_map:
+    finished = fetch_finished_matches_by_competitions(football_data_key, comp_codes, days_back=10)
+    if not finished:
         return 0
     conn = sqlite3.connect(db_path)
     rows = conn.execute(
@@ -1453,10 +1529,28 @@ def settle_open_legs(
     ).fetchall()
     settled_count = 0
     for rid, home, away, kickoff, market_key, bet_text in rows:
-        key = f"{normalize_team_name(home)}__{normalize_team_name(away)}"
-        if key not in finished_map:
+        home_n = normalize_team_name(home)
+        away_n = normalize_team_name(away)
+        leg_dt = parse_dt_utc(str(kickoff))
+        candidates = [m for m in finished if m["home_n"] == home_n and m["away_n"] == away_n]
+        if not candidates:
             continue
-        hg, ag = finished_map[key]
+        if leg_dt:
+            candidates.sort(
+                key=lambda m: abs(
+                    (
+                        (parse_dt_utc(str(m.get("utc_date") or "")) or leg_dt)
+                        - leg_dt
+                    ).total_seconds()
+                )
+            )
+            best = candidates[0]
+            best_dt = parse_dt_utc(str(best.get("utc_date") or ""))
+            if best_dt and abs((best_dt - leg_dt).total_seconds()) > (48 * 3600):
+                continue
+        else:
+            best = candidates[0]
+        hg, ag = int(best["hg"]), int(best["ag"])
         won = 1 if leg_won(market_key, bet_text, home, away, hg, ag) else 0
         odd_close = lookup_closing_odd(conn, home, away, kickoff, market_key, bet_text)
         conn.execute(
@@ -1473,10 +1567,11 @@ def settle_open_legs(
     return settled_count
 
 
-def load_settled_performance(db_path: Path) -> Dict[str, float]:
+def load_settled_performance(db_path: Path, played_only: bool = False) -> Dict[str, float]:
     if not db_path.exists():
         return {"n": 0.0, "hit_rate": 0.0, "avg_roi": 0.0, "avg_clv": 0.0}
     conn = sqlite3.connect(db_path)
+    filter_sql = "AND is_played = 1" if played_only else ""
     row = conn.execute(
         """
         SELECT
@@ -1487,6 +1582,7 @@ def load_settled_performance(db_path: Path) -> Dict[str, float]:
         FROM bet_legs
         WHERE settled = 1
         """
+        + f" {filter_sql}"
     ).fetchone()
     conn.close()
     n, hit_rate, avg_roi, avg_clv = row if row else (0, 0, 0, 0)
@@ -1498,17 +1594,18 @@ def load_settled_performance(db_path: Path) -> Dict[str, float]:
     }
 
 
-def load_calibration_bins(db_path: Path, bins: int = 10) -> List[Tuple[float, float, float]]:
+def load_calibration_bins(db_path: Path, bins: int = 10, prefer_played: bool = True) -> List[Tuple[float, float, float]]:
     if not db_path.exists():
         return []
     conn = sqlite3.connect(db_path)
-    rows = conn.execute(
-        """
-        SELECT model_prob, won
-        FROM bet_legs
-        WHERE settled = 1 AND model_prob > 0
-        """
-    ).fetchall()
+    where_clause = "settled = 1 AND model_prob > 0"
+    if prefer_played:
+        where_clause += " AND is_played = 1"
+    rows = conn.execute(f"SELECT model_prob, won FROM bet_legs WHERE {where_clause}").fetchall()
+    if prefer_played and len(rows) < 60:
+        rows = conn.execute(
+            "SELECT model_prob, won FROM bet_legs WHERE settled = 1 AND model_prob > 0"
+        ).fetchall()
     conn.close()
     if len(rows) < 60:
         return []
@@ -1559,6 +1656,135 @@ def apply_calibration_to_candidates(candidates: List[dict], bins_data: List[Tupl
             + (0.30 * c["consistency_prob"])
             - (0.2 * c["risk"])
         )
+
+
+def load_latest_adaptive_weights(db_path: Path) -> Dict[str, Any]:
+    if not db_path.exists():
+        return dict(DEFAULT_ADAPTIVE_WEIGHTS)
+    conn = sqlite3.connect(db_path)
+    row = conn.execute(
+        """
+        SELECT weights_json
+        FROM model_weights
+        ORDER BY id DESC
+        LIMIT 1
+        """
+    ).fetchone()
+    conn.close()
+    if not row:
+        return dict(DEFAULT_ADAPTIVE_WEIGHTS)
+    try:
+        parsed = json.loads(str(row[0]))
+        if not isinstance(parsed, dict):
+            return dict(DEFAULT_ADAPTIVE_WEIGHTS)
+        base = dict(DEFAULT_ADAPTIVE_WEIGHTS)
+        base["market_factor"].update(parsed.get("market_factor", {}))
+        base["odd_bucket_factor"].update(parsed.get("odd_bucket_factor", {}))
+        return base
+    except Exception:
+        return dict(DEFAULT_ADAPTIVE_WEIGHTS)
+
+
+def recompute_adaptive_weights(
+    db_path: Path,
+    min_settled: int = 120,
+    prefer_played: bool = True,
+) -> Dict[str, Any]:
+    if not db_path.exists():
+        return dict(DEFAULT_ADAPTIVE_WEIGHTS)
+    conn = sqlite3.connect(db_path)
+    base_sql = """
+        SELECT market_key, odd_open, won
+        FROM bet_legs
+        WHERE settled = 1 AND odd_open > 1.01 AND won IS NOT NULL
+    """
+    if prefer_played:
+        rows = conn.execute(base_sql + " AND is_played = 1 ORDER BY id DESC LIMIT 2500").fetchall()
+        if len(rows) < min_settled:
+            rows = conn.execute(base_sql + " ORDER BY id DESC LIMIT 2500").fetchall()
+    else:
+        rows = conn.execute(base_sql + " ORDER BY id DESC LIMIT 2500").fetchall()
+    if len(rows) < min_settled:
+        conn.close()
+        return load_latest_adaptive_weights(db_path)
+
+    wins = np.array([float(r[2]) for r in rows], dtype=float)
+    odds = np.array([float(r[1]) for r in rows], dtype=float)
+    markets = [str(r[0]) for r in rows]
+    baseline_hit = float(wins.mean())
+
+    market_factor = dict(DEFAULT_ADAPTIVE_WEIGHTS["market_factor"])
+    for mk in ("h2h", "totals", "btts"):
+        mask = np.array([m == mk for m in markets], dtype=bool)
+        if int(mask.sum()) < 25:
+            continue
+        sub_wins = wins[mask]
+        sub_odds = odds[mask]
+        hit = float(sub_wins.mean())
+        roi = float(np.mean(np.where(sub_wins > 0.5, sub_odds - 1.0, -1.0)))
+        factor = 1.0 + (0.95 * (hit - baseline_hit)) + (0.22 * roi)
+        market_factor[mk] = clamp(float(factor), 0.82, 1.18)
+
+    odd_bucket_factor = dict(DEFAULT_ADAPTIVE_WEIGHTS["odd_bucket_factor"])
+    bucket_defs = {
+        "low": (1.01, 1.80),
+        "mid": (1.80, 2.50),
+        "high": (2.50, 100.0),
+    }
+    for bkey, (lo, hi) in bucket_defs.items():
+        mask = (odds >= lo) & (odds < hi)
+        if int(mask.sum()) < 25:
+            continue
+        sub_wins = wins[mask]
+        sub_odds = odds[mask]
+        hit = float(sub_wins.mean())
+        roi = float(np.mean(np.where(sub_wins > 0.5, sub_odds - 1.0, -1.0)))
+        factor = 1.0 + (0.90 * (hit - baseline_hit)) + (0.20 * roi)
+        odd_bucket_factor[bkey] = clamp(float(factor), 0.84, 1.18)
+
+    weights = {"market_factor": market_factor, "odd_bucket_factor": odd_bucket_factor}
+    conn.execute(
+        """
+        INSERT INTO model_weights (created_at, settled_count, weights_json)
+        VALUES (?, ?, ?)
+        """,
+        (
+            datetime.now(timezone.utc).isoformat(),
+            int(len(rows)),
+            json.dumps(weights, ensure_ascii=True),
+        ),
+    )
+    conn.commit()
+    conn.close()
+    return weights
+
+
+def apply_adaptive_weights(candidates: List[dict], weights: Dict[str, Any]) -> None:
+    if not candidates:
+        return
+    market_factor = (weights or {}).get("market_factor", {})
+    odd_bucket_factor = (weights or {}).get("odd_bucket_factor", {})
+    for c in candidates:
+        mk = str(c.get("market_key", ""))
+        odd = float(c.get("odd", 1.0))
+        if odd < 1.80:
+            ob = "low"
+        elif odd < 2.50:
+            ob = "mid"
+        else:
+            ob = "high"
+        mfx = float(market_factor.get(mk, 1.0))
+        ofx = float(odd_bucket_factor.get(ob, 1.0))
+        fx = clamp(mfx * ofx, 0.72, 1.26)
+        c["adaptive_factor"] = fx
+        c["confidence"] = clamp(c["confidence"] * (0.93 + (0.07 * fx)), 0.0, 1.0)
+        c["risk"] = clamp(1.0 - c["confidence"] + (0.45 / max(c["odd"], 1.2)), 0.0, 1.0)
+        c["value_score"] = (
+            (c["edge"] * math.log(max(c["odd"], 1.1)) * math.sqrt(max(c["bookmakers_count"], 1)))
+            + (0.35 * c["roi"])
+            + (0.30 * c["consistency_prob"])
+            - (0.2 * c["risk"])
+        ) * fx
 
 
 def render_coupon_panel(profile: CouponProfile, picks: List[dict], total_odd: float, metrics: Dict[str, float]) -> None:
@@ -2021,6 +2247,33 @@ def parse_injury_csv(uploaded_file) -> Dict[str, float]:
     return out
 
 
+def fetch_injury_csv_from_url(csv_url: str, timeout_sec: int = 12) -> Tuple[Dict[str, float], Optional[str]]:
+    if not csv_url.strip():
+        return {}, None
+    try:
+        resp = requests.get(csv_url.strip(), timeout=timeout_sec)
+    except Exception as exc:
+        return {}, f"Sakatlik URL baglanti hatasi: {exc}"
+    if resp.status_code != 200:
+        return {}, f"Sakatlik URL HTTP hatasi: {resp.status_code}"
+    try:
+        df = pd.read_csv(io.StringIO(resp.text))
+    except Exception as exc:
+        return {}, f"Sakatlik URL CSV okunamadi: {exc}"
+
+    if "team" not in df.columns or "missing_count" not in df.columns:
+        return {}, "Sakatlik URL CSV formati gecersiz. Beklenen kolonlar: team,missing_count"
+
+    out: Dict[str, float] = {}
+    for _, r in df.iterrows():
+        team = str(r.get("team", "")).strip()
+        if not team:
+            continue
+        miss = float(r.get("missing_count", 0.0) or 0.0)
+        out[normalize_team_name(team)] = clamp(miss * 0.035, 0.0, 0.35)
+    return out, None
+
+
 def generate_daily_report(
     db_path: Path,
     candidates: List[dict],
@@ -2059,6 +2312,104 @@ def generate_daily_report(
     conn.commit()
     conn.close()
     return report_path
+
+
+def run_coupon_engine(
+    *,
+    db_path: Path,
+    odds_key: str,
+    football_key: str,
+    region: str,
+    leagues: List[str],
+    days: int = 3,
+    simulations: int = 10000,
+    open_mode: bool = True,
+    quality_level: str = "Maksimum",
+    depth_level: str = "Maksimum",
+    save_history: bool = True,
+    auto_report: bool = True,
+    injury_adjustments: Optional[Dict[str, float]] = None,
+    played_profile_keys: Optional[List[str]] = None,
+) -> Dict[str, Any]:
+    if not odds_key.strip():
+        raise ValueError("ODDS_API_KEY gerekli.")
+    if not leagues:
+        raise ValueError("En az bir lig secilmeli.")
+
+    init_db(db_path)
+    odds_events = fetch_odds_events(
+        odds_api_key=odds_key.strip(),
+        region=region.strip() or "eu",
+        sport_keys=leagues,
+        days=max(1, int(days)),
+    )
+    if not odds_events:
+        raise RuntimeError("Mac bulunamadi. Lig, bolge veya gun ayarini degistir.")
+
+    standings = {}
+    team_contexts: Dict[int, dict] = {}
+    settled_now = 0
+    football_key = football_key.strip()
+    if football_key:
+        comp_codes = sorted({LEAGUES[k]["fd_comp"] for k in leagues if k in LEAGUES})
+        standings = fetch_standings(football_data_key=football_key, competition_codes=comp_codes)
+        team_map = build_team_id_map_for_events(odds_events, standings)
+        if team_map:
+            team_contexts = fetch_team_contexts(
+                football_data_key=football_key,
+                team_ids=tuple(sorted(set(team_map.values()))),
+            )
+        settled_now = settle_open_legs(db_path, football_key, leagues)
+
+    candidates = extract_candidates(odds_events, standings, team_contexts, injury_adjustments or {})
+    calib_bins = load_calibration_bins(db_path, bins=10)
+    apply_calibration_to_candidates(candidates, calib_bins)
+    adaptive_weights = recompute_adaptive_weights(db_path, min_settled=120)
+    apply_adaptive_weights(candidates, adaptive_weights)
+    candidates.sort(key=lambda c: (c["value_score"], c["edge"], c["odd"]), reverse=True)
+    if not candidates:
+        raise RuntimeError("Model filtrelerinden gecen aday secim bulunamadi.")
+
+    generated = []
+    played_set = set(played_profile_keys or [])
+    for idx, profile in enumerate(PROFILES):
+        picks, total_odd = generate_coupon(
+            candidates,
+            profile,
+            seed=2026 + idx,
+            open_mode=open_mode,
+            quality_level=quality_level,
+            depth_level=depth_level,
+        )
+        metrics = coupon_metrics(picks, total_odd, simulations=simulations)
+        generated.append((profile, picks, total_odd, metrics))
+        if save_history:
+            save_coupon(
+                db_path,
+                profile,
+                picks,
+                total_odd,
+                metrics,
+                is_played=(profile.key in played_set),
+            )
+
+    report_path = None
+    machine_report_path = None
+    if auto_report:
+        report_path = generate_daily_report(db_path, candidates, generated)
+        machine_report_path = generate_machine_report_json(
+            db_path, candidates, generated, perf=load_settled_performance(db_path)
+        )
+
+    return {
+        "odds_events": odds_events,
+        "candidates": candidates,
+        "generated": generated,
+        "calib_bins": calib_bins,
+        "settled_now": settled_now,
+        "report_path": report_path,
+        "machine_report_path": machine_report_path,
+    }
 def main() -> None:
     st.set_page_config(page_title="Bet AI Kupon Motoru Pro", layout="wide")
     inject_custom_css()
@@ -2068,6 +2419,7 @@ def main() -> None:
 
     odds_key_env = os.getenv("ODDS_API_KEY", "").strip()
     football_key_env = os.getenv("FOOTBALL_DATA_API_KEY", "").strip()
+    injury_csv_url_env = os.getenv("INJURY_CSV_URL", "").strip()
     require_user_keys = os.getenv("REQUIRE_USER_KEYS", "true").strip().lower() == "true"
     default_region = os.getenv("REGION", "eu").strip()
     db_path = Path("data/coupon_history.db")
@@ -2126,7 +2478,19 @@ def main() -> None:
         st.divider()
         st.subheader("Ek Veri")
         injury_file = st.file_uploader("Sakatlik CSV (team,missing_count)", type=["csv"], accept_multiple_files=False)
+        injury_csv_url = st.text_input(
+            "Sakatlik CSV URL (opsiyonel)",
+            value=injury_csv_url_env,
+            placeholder="https://.../injuries.csv",
+        )
+        use_injury_url = st.toggle("URL'den otomatik sakatlik verisi cek", value=bool(injury_csv_url_env))
         auto_report = st.toggle("Gunluk raporu otomatik olustur", value=True)
+        played_profile_keys = st.multiselect(
+            "Oynadigim kupon profilleri (gercek performans icin)",
+            options=[p.key for p in PROFILES],
+            default=[],
+            format_func=lambda k: next((p.title for p in PROFILES if p.key == k), k),
+        )
 
     if not run:
         st.info("'Kuponlari Uret' butonuna basarak sistemin tam analizini calistir.")
@@ -2163,10 +2527,25 @@ def main() -> None:
         except Exception as exc:
             st.warning(f"Football-data katmani hata verdi: {exc}. Sadece odds modeliyle devam ediliyor.")
 
-    injury_adjustments = parse_injury_csv(injury_file)
+    injury_adjustments: Dict[str, float] = {}
+    if use_injury_url and injury_csv_url.strip():
+        url_adjustments, url_err = fetch_injury_csv_from_url(injury_csv_url)
+        if url_err:
+            st.warning(url_err)
+        else:
+            injury_adjustments.update(url_adjustments)
+            st.caption(f"URL'den {len(url_adjustments)} takim icin sakatlik etkisi yuklendi.")
+
+    manual_adjustments = parse_injury_csv(injury_file)
+    if manual_adjustments:
+        injury_adjustments.update(manual_adjustments)
+        st.caption(f"Manuel CSV'den {len(manual_adjustments)} takim icin sakatlik etkisi yuklendi.")
+
     candidates = extract_candidates(odds_events, standings, team_contexts, injury_adjustments)
     calib_bins = load_calibration_bins(db_path, bins=10)
     apply_calibration_to_candidates(candidates, calib_bins)
+    adaptive_weights = recompute_adaptive_weights(db_path, min_settled=120)
+    apply_adaptive_weights(candidates, adaptive_weights)
     candidates.sort(key=lambda c: (c["value_score"], c["edge"], c["odd"]), reverse=True)
     if not candidates:
         st.warning("Model filtrelerinden gecen aday secim bulunamadi.")
@@ -2177,6 +2556,7 @@ def main() -> None:
         st.info(f"Otomatik settlement tamamlandi: {settled_now} leg sonuclandirildi.")
 
     generated = []
+    played_set = set(played_profile_keys or [])
     for idx, profile in enumerate(PROFILES):
         picks, total_odd = generate_coupon(
             candidates,
@@ -2189,7 +2569,14 @@ def main() -> None:
         metrics = coupon_metrics(picks, total_odd, simulations=simulations)
         generated.append((profile, picks, total_odd, metrics))
         if save_history:
-            save_coupon(db_path, profile, picks, total_odd, metrics)
+            save_coupon(
+                db_path,
+                profile,
+                picks,
+                total_odd,
+                metrics,
+                is_played=(profile.key in played_set),
+            )
 
     render_overview_cards(candidates, generated)
     plan_df = stake_plan_for_coupons(generated, bankroll=bankroll, risk_mode=risk_mode)
@@ -2302,16 +2689,21 @@ def main() -> None:
         render_alert_center(candidates)
         st.divider()
         st.subheader("Gercek Performans ve Kalibrasyon")
-        perf = load_settled_performance(db_path)
+        perf_played = load_settled_performance(db_path, played_only=True)
+        perf_all = load_settled_performance(db_path, played_only=False)
         pc1, pc2, pc3, pc4 = st.columns(4)
         with pc1:
-            st.metric("Settled Leg", f"{int(perf['n'])}")
+            st.metric("Settled (Oynanan)", f"{int(perf_played['n'])}")
         with pc2:
-            st.metric("Gercek Hit", f"%{perf['hit_rate']*100:.2f}")
+            st.metric("Hit (Oynanan)", f"%{perf_played['hit_rate']*100:.2f}")
         with pc3:
-            st.metric("Gercek Ortalama ROI", f"%{perf['avg_roi']*100:.2f}")
+            st.metric("ROI (Oynanan)", f"%{perf_played['avg_roi']*100:.2f}")
         with pc4:
-            st.metric("Ortalama CLV", f"%{perf['avg_clv']*100:.3f}")
+            st.metric("CLV (Oynanan)", f"%{perf_played['avg_clv']*100:.3f}")
+        st.caption(
+            f"Model havuzu (tum oneriler): {int(perf_all['n'])} leg | hit %{perf_all['hit_rate']*100:.2f} | "
+            f"ROI %{perf_all['avg_roi']*100:.2f}"
+        )
         if calib_bins:
             cal_df = pd.DataFrame(
                 [{"bin_alt": b[0], "pred_ort": b[1], "gercek_ort": b[2]} for b in calib_bins]

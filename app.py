@@ -1264,11 +1264,16 @@ def init_db(db_path: Path) -> None:
             bet_text TEXT NOT NULL,
             odd_open REAL NOT NULL,
             model_prob REAL NOT NULL,
+            pred_home_goals INTEGER,
+            pred_away_goals INTEGER,
+            pred_iyms TEXT,
             is_played INTEGER NOT NULL DEFAULT 0,
             settled INTEGER NOT NULL DEFAULT 0,
             won INTEGER,
             home_goals INTEGER,
             away_goals INTEGER,
+            score_abs_error REAL,
+            iyms_hit INTEGER,
             odd_close REAL
         )
         """
@@ -1311,6 +1316,16 @@ def init_db(db_path: Path) -> None:
     cols = [r[1] for r in conn.execute("PRAGMA table_info(bet_legs)").fetchall()]
     if "is_played" not in cols:
         conn.execute("ALTER TABLE bet_legs ADD COLUMN is_played INTEGER NOT NULL DEFAULT 0")
+    if "pred_home_goals" not in cols:
+        conn.execute("ALTER TABLE bet_legs ADD COLUMN pred_home_goals INTEGER")
+    if "pred_away_goals" not in cols:
+        conn.execute("ALTER TABLE bet_legs ADD COLUMN pred_away_goals INTEGER")
+    if "pred_iyms" not in cols:
+        conn.execute("ALTER TABLE bet_legs ADD COLUMN pred_iyms TEXT")
+    if "score_abs_error" not in cols:
+        conn.execute("ALTER TABLE bet_legs ADD COLUMN score_abs_error REAL")
+    if "iyms_hit" not in cols:
+        conn.execute("ALTER TABLE bet_legs ADD COLUMN iyms_hit INTEGER")
     conn.commit()
     conn.close()
 
@@ -1363,12 +1378,14 @@ def save_coupon(
         ),
     )
     for p in picks:
+        pred_hg, pred_ag = parse_score_pred(p.get("score_pred"))
         conn.execute(
             """
             INSERT INTO bet_legs (
                 run_id, created_at, profile_key, league, home, away, kickoff,
-                market_key, bet_text, odd_open, model_prob, is_played, settled
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0)
+                market_key, bet_text, odd_open, model_prob, pred_home_goals, pred_away_goals,
+                pred_iyms, is_played, settled
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0)
             """,
             (
                 run_id,
@@ -1382,6 +1399,9 @@ def save_coupon(
                 p["pick"],
                 float(p["odd"]),
                 float(p["model_prob"]),
+                pred_hg,
+                pred_ag,
+                str(p.get("iyms_pred") or ""),
                 1 if is_played else 0,
             ),
         )
@@ -1427,6 +1447,33 @@ def load_recent_history(db_path: Path, limit: int = 25) -> pd.DataFrame:
 def parse_pick_line(pick_text: str, default_line: float = 2.5) -> float:
     m = re.search(r"(\d+(?:\.\d+)?)", pick_text)
     return float(m.group(1)) if m else default_line
+
+
+def parse_score_pred(score_pred: Optional[str]) -> Tuple[Optional[int], Optional[int]]:
+    if not score_pred:
+        return None, None
+    m = re.match(r"^\s*(\d+)\s*-\s*(\d+)\s*$", str(score_pred))
+    if not m:
+        return None, None
+    return int(m.group(1)), int(m.group(2))
+
+
+def calc_score_abs_error(pred_hg: Optional[int], pred_ag: Optional[int], hg: int, ag: int) -> Optional[float]:
+    if pred_hg is None or pred_ag is None:
+        return None
+    return float(abs(pred_hg - hg) + abs(pred_ag - ag))
+
+
+def calc_iyms_hit(pred_iyms: Optional[str], hg: int, ag: int) -> Optional[int]:
+    if not pred_iyms:
+        return None
+    if "/" not in str(pred_iyms):
+        return None
+    pred = str(pred_iyms).strip().upper()
+    ft = match_outcome(hg, ag)
+    # HT result unknown from full-time feed in current settlement pipeline; keep strict on FT token (right side).
+    rhs = pred.split("/")[-1].strip() if "/" in pred else pred
+    return 1 if rhs == ft else 0
 
 
 def leg_won(market_key: str, pick_text: str, home: str, away: str, hg: int, ag: int) -> bool:
@@ -1553,13 +1600,22 @@ def settle_open_legs(
         hg, ag = int(best["hg"]), int(best["ag"])
         won = 1 if leg_won(market_key, bet_text, home, away, hg, ag) else 0
         odd_close = lookup_closing_odd(conn, home, away, kickoff, market_key, bet_text)
+        pred_row = conn.execute(
+            "SELECT pred_home_goals, pred_away_goals, pred_iyms FROM bet_legs WHERE id = ?",
+            (int(rid),),
+        ).fetchone()
+        pred_hg = int(pred_row[0]) if pred_row and pred_row[0] is not None else None
+        pred_ag = int(pred_row[1]) if pred_row and pred_row[1] is not None else None
+        pred_iyms = str(pred_row[2]) if pred_row and pred_row[2] is not None else None
+        score_abs_error = calc_score_abs_error(pred_hg, pred_ag, hg, ag)
+        iyms_hit = calc_iyms_hit(pred_iyms, hg, ag)
         conn.execute(
             """
             UPDATE bet_legs
-            SET settled = 1, won = ?, home_goals = ?, away_goals = ?, odd_close = ?
+            SET settled = 1, won = ?, home_goals = ?, away_goals = ?, score_abs_error = ?, iyms_hit = ?, odd_close = ?
             WHERE id = ?
             """,
-            (won, int(hg), int(ag), odd_close, int(rid)),
+            (won, int(hg), int(ag), score_abs_error, iyms_hit, odd_close, int(rid)),
         )
         settled_count += 1
     conn.commit()
@@ -1578,19 +1634,23 @@ def load_settled_performance(db_path: Path, played_only: bool = False) -> Dict[s
             COUNT(*) AS n,
             AVG(CASE WHEN won = 1 THEN 1.0 ELSE 0.0 END) AS hit_rate,
             AVG(CASE WHEN won = 1 THEN odd_open - 1.0 ELSE -1.0 END) AS avg_roi,
-            AVG(CASE WHEN odd_close IS NOT NULL THEN (1.0/odd_open) - (1.0/odd_close) END) AS avg_clv
+            AVG(CASE WHEN odd_close IS NOT NULL THEN (1.0/odd_open) - (1.0/odd_close) END) AS avg_clv,
+            AVG(score_abs_error) AS score_mae,
+            AVG(CASE WHEN iyms_hit IS NOT NULL THEN iyms_hit END) AS iyms_hit_rate
         FROM bet_legs
         WHERE settled = 1
         """
         + f" {filter_sql}"
     ).fetchone()
     conn.close()
-    n, hit_rate, avg_roi, avg_clv = row if row else (0, 0, 0, 0)
+    n, hit_rate, avg_roi, avg_clv, score_mae, iyms_hit_rate = row if row else (0, 0, 0, 0, 0, 0)
     return {
         "n": float(n or 0),
         "hit_rate": float(hit_rate or 0.0),
         "avg_roi": float(avg_roi or 0.0),
         "avg_clv": float(avg_clv or 0.0),
+        "score_mae": float(score_mae or 0.0),
+        "iyms_hit_rate": float(iyms_hit_rate or 0.0),
     }
 
 
@@ -1778,6 +1838,66 @@ def apply_adaptive_weights(candidates: List[dict], weights: Dict[str, Any]) -> N
         fx = clamp(mfx * ofx, 0.72, 1.26)
         c["adaptive_factor"] = fx
         c["confidence"] = clamp(c["confidence"] * (0.93 + (0.07 * fx)), 0.0, 1.0)
+        c["risk"] = clamp(1.0 - c["confidence"] + (0.45 / max(c["odd"], 1.2)), 0.0, 1.0)
+        c["value_score"] = (
+            (c["edge"] * math.log(max(c["odd"], 1.1)) * math.sqrt(max(c["bookmakers_count"], 1)))
+            + (0.35 * c["roi"])
+            + (0.30 * c["consistency_prob"])
+            - (0.2 * c["risk"])
+        ) * fx
+
+
+def load_score_quality_factors(db_path: Path, played_only: bool = True) -> Dict[str, float]:
+    if not db_path.exists():
+        return {"h2h": 1.0, "totals": 1.0, "btts": 1.0}
+    conn = sqlite3.connect(db_path)
+    where = "settled = 1 AND score_abs_error IS NOT NULL AND iyms_hit IS NOT NULL"
+    if played_only:
+        where += " AND is_played = 1"
+    rows = conn.execute(
+        f"""
+        SELECT market_key, AVG(score_abs_error) AS mae, AVG(iyms_hit) AS iyms, COUNT(*) AS n
+        FROM bet_legs
+        WHERE {where}
+        GROUP BY market_key
+        """
+    ).fetchall()
+    if played_only and sum(int(r[3] or 0) for r in rows) < 40:
+        rows = conn.execute(
+            """
+            SELECT market_key, AVG(score_abs_error) AS mae, AVG(iyms_hit) AS iyms, COUNT(*) AS n
+            FROM bet_legs
+            WHERE settled = 1 AND score_abs_error IS NOT NULL AND iyms_hit IS NOT NULL
+            GROUP BY market_key
+            """
+        ).fetchall()
+    conn.close()
+    base = {"h2h": 1.0, "totals": 1.0, "btts": 1.0}
+    total_n = sum(int(r[3] or 0) for r in rows)
+    if total_n < 25:
+        return base
+    weighted_mae = sum(float(r[1] or 0.0) * int(r[3] or 0) for r in rows) / max(total_n, 1)
+    weighted_iyms = sum(float(r[2] or 0.0) * int(r[3] or 0) for r in rows) / max(total_n, 1)
+    for mk, mae, iyms, n in rows:
+        mk_s = str(mk or "")
+        n_i = int(n or 0)
+        if mk_s not in base or n_i < 8:
+            continue
+        mae_f = 1.0 + (0.14 * (weighted_mae - float(mae or 0.0)))
+        iy_f = 1.0 + (0.24 * (float(iyms or 0.0) - weighted_iyms))
+        sample_f = clamp(0.90 + min(n_i, 120) / 300.0, 0.90, 1.20)
+        base[mk_s] = clamp(mae_f * iy_f * sample_f, 0.85, 1.18)
+    return base
+
+
+def apply_score_quality_factors(candidates: List[dict], factors: Dict[str, float]) -> None:
+    if not candidates:
+        return
+    for c in candidates:
+        mk = str(c.get("market_key", ""))
+        fx = float(factors.get(mk, 1.0))
+        c["score_quality_factor"] = fx
+        c["confidence"] = clamp(c["confidence"] * (0.95 + (0.05 * fx)), 0.0, 1.0)
         c["risk"] = clamp(1.0 - c["confidence"] + (0.45 / max(c["odd"], 1.2)), 0.0, 1.0)
         c["value_score"] = (
             (c["edge"] * math.log(max(c["odd"], 1.1)) * math.sqrt(max(c["bookmakers_count"], 1)))
@@ -2366,6 +2486,8 @@ def run_coupon_engine(
     apply_calibration_to_candidates(candidates, calib_bins)
     adaptive_weights = recompute_adaptive_weights(db_path, min_settled=120)
     apply_adaptive_weights(candidates, adaptive_weights)
+    score_quality_factors = load_score_quality_factors(db_path, played_only=True)
+    apply_score_quality_factors(candidates, score_quality_factors)
     candidates.sort(key=lambda c: (c["value_score"], c["edge"], c["odd"]), reverse=True)
     if not candidates:
         raise RuntimeError("Model filtrelerinden gecen aday secim bulunamadi.")
@@ -2546,6 +2668,8 @@ def main() -> None:
     apply_calibration_to_candidates(candidates, calib_bins)
     adaptive_weights = recompute_adaptive_weights(db_path, min_settled=120)
     apply_adaptive_weights(candidates, adaptive_weights)
+    score_quality_factors = load_score_quality_factors(db_path, played_only=True)
+    apply_score_quality_factors(candidates, score_quality_factors)
     candidates.sort(key=lambda c: (c["value_score"], c["edge"], c["odd"]), reverse=True)
     if not candidates:
         st.warning("Model filtrelerinden gecen aday secim bulunamadi.")
@@ -2700,9 +2824,14 @@ def main() -> None:
             st.metric("ROI (Oynanan)", f"%{perf_played['avg_roi']*100:.2f}")
         with pc4:
             st.metric("CLV (Oynanan)", f"%{perf_played['avg_clv']*100:.3f}")
+        qc1, qc2 = st.columns(2)
+        with qc1:
+            st.metric("Skor Hata (MAE, Oynanan)", f"{perf_played['score_mae']:.2f}")
+        with qc2:
+            st.metric("IY/MS Isabet (Oynanan)", f"%{perf_played['iyms_hit_rate']*100:.2f}")
         st.caption(
             f"Model havuzu (tum oneriler): {int(perf_all['n'])} leg | hit %{perf_all['hit_rate']*100:.2f} | "
-            f"ROI %{perf_all['avg_roi']*100:.2f}"
+            f"ROI %{perf_all['avg_roi']*100:.2f} | skor hata {perf_all['score_mae']:.2f} | IY/MS %{perf_all['iyms_hit_rate']*100:.2f}"
         )
         if calib_bins:
             cal_df = pd.DataFrame(

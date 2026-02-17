@@ -914,7 +914,13 @@ def extract_candidates(
                     away=away,
                 )
                 market_prob = implied_prob(odd)
-                model_prob = float(adjusted_probs[idx])
+                raw_model_prob = float(adjusted_probs[idx])
+                realism_score = clamp(
+                    (0.45 * consistency_prob) + (0.35 * score_pred_prob) + (0.20 * iyms_pred_prob),
+                    0.0,
+                    1.0,
+                )
+                model_prob = clamp(raw_model_prob * (0.75 + (0.25 * realism_score)), 0.01, 0.99)
                 edge = model_prob - market_prob
                 books = int(bucket["book_count"][outcome_name])
                 roi = (model_prob * odd) - 1.0
@@ -931,6 +937,7 @@ def extract_candidates(
                     (edge * math.log(max(odd, 1.1)) * math.sqrt(max(books, 1)))
                     + (0.35 * roi)
                     + (0.30 * consistency_prob)
+                    + (0.18 * realism_score)
                     - (0.2 * risk)
                 )
                 candidates.append(
@@ -947,6 +954,7 @@ def extract_candidates(
                         "bet_type": bet_type,
                         "bet_text": bet_text,
                         "odd": float(odd),
+                        "raw_model_prob": raw_model_prob,
                         "model_prob": model_prob,
                         "market_prob": market_prob,
                         "edge": edge,
@@ -954,6 +962,7 @@ def extract_candidates(
                         "confidence": confidence,
                         "risk": risk,
                         "consistency_prob": consistency_prob,
+                        "realism_score": realism_score,
                         "motivation_home": home_data.get("motivation", 0.5),
                         "motivation_away": away_data.get("motivation", 0.5),
                         "injury_risk_home": home_data.get("injury_risk_proxy", 0.2),
@@ -986,10 +995,13 @@ def candidate_pool(
         return pool[:650]
 
     consistency_min = 0.40
+    realism_min = 0.24
     if quality_level == "Maksimum":
         consistency_min = 0.48
+        realism_min = 0.30
     elif quality_level == "Dengeli":
         consistency_min = 0.32
+        realism_min = 0.18
 
     filtered = [
         c
@@ -998,6 +1010,7 @@ def candidate_pool(
         and c["edge"] >= profile.min_edge
         and c["model_prob"] >= profile.min_prob
         and c["consistency_prob"] >= consistency_min
+        and c["realism_score"] >= realism_min
         and c["bookmakers_count"] >= profile.min_books
     ]
     return filtered[:260]
@@ -1019,6 +1032,7 @@ def relaxed_candidate_pool(
         and c["edge"] >= max(profile.min_edge * 0.55, 0.008)
         and c["model_prob"] >= max(profile.min_prob * 0.70, 0.04)
         and c["consistency_prob"] >= 0.22
+        and c["realism_score"] >= 0.16
         and c["bookmakers_count"] >= 1
     ]
     return relaxed[:320]
@@ -1209,13 +1223,14 @@ def ai_leg_comment(pick: dict) -> str:
     roi = pick["roi"] * 100.0
     risk = pick["risk"] * 100.0
     consistency = pick["consistency_prob"] * 100.0
+    realism = pick.get("realism_score", 0.0) * 100.0
     if conf >= 62:
         trust = "guven yuksek"
     elif conf >= 45:
         trust = "guven orta"
     else:
         trust = "agresif secim"
-    return f"{trust}; edge %{edge:.2f}; roi %{roi:.2f}; tutarlilik %{consistency:.1f}; risk %{risk:.1f}; kaynak {pick['bookmakers_count']} bookmaker"
+    return f"{trust}; edge %{edge:.2f}; roi %{roi:.2f}; tutarlilik %{consistency:.1f}; gerceklik %{realism:.1f}; risk %{risk:.1f}; kaynak {pick['bookmakers_count']} bookmaker"
 
 
 def ai_coupon_summary(profile: CouponProfile, picks: List[dict], total_odd: float, metrics: Dict[str, float]) -> str:
@@ -1775,6 +1790,7 @@ def apply_calibration_to_candidates(candidates: List[dict], bins_data: List[Tupl
             (0.55 * c["model_prob"])
             + (2.8 * max(c["edge"], 0.0))
             + (0.4 * max(c["roi"], 0.0))
+            + (0.12 * c.get("realism_score", 0.0))
             + (0.03 * math.log(max(c["bookmakers_count"], 1) + 1.0)),
             0.0,
             1.0,
@@ -1784,6 +1800,7 @@ def apply_calibration_to_candidates(candidates: List[dict], bins_data: List[Tupl
             (c["edge"] * math.log(max(c["odd"], 1.1)) * math.sqrt(max(c["bookmakers_count"], 1)))
             + (0.35 * c["roi"])
             + (0.30 * c["consistency_prob"])
+            + (0.18 * c.get("realism_score", 0.0))
             - (0.2 * c["risk"])
         )
 
@@ -1913,6 +1930,7 @@ def apply_adaptive_weights(candidates: List[dict], weights: Dict[str, Any]) -> N
             (c["edge"] * math.log(max(c["odd"], 1.1)) * math.sqrt(max(c["bookmakers_count"], 1)))
             + (0.35 * c["roi"])
             + (0.30 * c["consistency_prob"])
+            + (0.18 * c.get("realism_score", 0.0))
             - (0.2 * c["risk"])
         ) * fx
 
@@ -1973,6 +1991,7 @@ def apply_score_quality_factors(candidates: List[dict], factors: Dict[str, float
             (c["edge"] * math.log(max(c["odd"], 1.1)) * math.sqrt(max(c["bookmakers_count"], 1)))
             + (0.35 * c["roi"])
             + (0.30 * c["consistency_prob"])
+            + (0.18 * c.get("realism_score", 0.0))
             - (0.2 * c["risk"])
         ) * fx
 
@@ -2069,6 +2088,7 @@ def build_visuals(candidates: List[dict]) -> None:
                 "edge",
                 "roi",
                 "consistency_prob",
+                "realism_score",
                 "motivation_home",
                 "motivation_away",
                 "days_rest_home",
@@ -2091,6 +2111,7 @@ def build_visuals(candidates: List[dict]) -> None:
     show["edge"] = (show["edge"] * 100.0).round(3)
     show["roi"] = (show["roi"] * 100.0).round(3)
     show["consistency_prob"] = (show["consistency_prob"] * 100.0).round(3)
+    show["realism_score"] = (show["realism_score"] * 100.0).round(3)
     show["motivation_home"] = (show["motivation_home"] * 100.0).round(1)
     show["motivation_away"] = (show["motivation_away"] * 100.0).round(1)
     show["injury_risk_home"] = (show["injury_risk_home"] * 100.0).round(1)

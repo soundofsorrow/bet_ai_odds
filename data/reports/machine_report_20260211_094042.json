@@ -1,0 +1,173 @@
+{
+  "created_at": "2026-02-11T09:40:42.024224+00:00",
+  "candidate_count": 45,
+  "profiles": [
+    {
+      "profile": "Yuksek Oran",
+      "legs": 8,
+      "total_odd": 601.5681819123702,
+      "hit_prob": 0.02323677036691572,
+      "ev_mult": 13.97850170314073,
+      "roi_pct": 1297.850170314073
+    },
+    {
+      "profile": "Canavar Kupon",
+      "legs": 9,
+      "total_odd": 2646.339928471896,
+      "hit_prob": 0.00293058309100896,
+      "ev_mult": 7.7553190474416,
+      "roi_pct": 675.53190474416
+    },
+    {
+      "profile": "Altin Vurus",
+      "legs": 9,
+      "total_odd": 14176.821045385157,
+      "hit_prob": 0.00021227413410029704,
+      "ev_mult": 3.009372411704002,
+      "roi_pct": 200.9372411704002
+    }
+  ],
+  "settled_performance": {
+    "n": 72.0,
+    "hit_rate": 0.5833333333333334,
+    "avg_roi": 0.5341666666666665,
+    "avg_clv": 0.010266795958442888
+  },
+  "premium_shortlist_top10": [
+    {
+      "lig": "La Liga",
+      "mac": "Elche CF - CA Osasuna",
+      "tarih": "13.02.2026 23:00",
+      "onerilen_bahis": "Mac Sonucu -> MS1",
+      "oran": 2.97,
+      "model_olasilik_%": 59.16,
+      "roi_%": 75.71,
+      "tutarlilik_%": 43.37,
+      "skor": "1-0 (%30.3)",
+      "iy_ms": "1/1 (%59.6)",
+      "alternatif_bahis": "Mac Sonucu -> MS2 (2.78)",
+      "guven_notu": "A+",
+      "premium_skor": 0.5673
+    },
+    {
+      "lig": "Bundesliga",
+      "mac": "Borussia Dortmund - FSV Mainz 05",
+      "tarih": "13.02.2026 22:30",
+      "onerilen_bahis": "Alt/Ust -> 2.5 Alt",
+      "oran": 2.45,
+      "model_olasilik_%": 63.39,
+      "roi_%": 55.3,
+      "tutarlilik_%": 46.14,
+      "skor": "1-0 (%24.1)",
+      "iy_ms": "1/1 (%27.3)",
+      "alternatif_bahis": "Alt/Ust -> 2.5 Ust (2.46)",
+      "guven_notu": "A+",
+      "premium_skor": 0.5525
+    },
+    {
+      "lig": "Premier League",
+      "mac": "Manchester City - Fulham",
+      "tarih": "11.02.2026 22:30",
+      "onerilen_bahis": "Alt/Ust -> 2.5 Ust",
+      "oran": 2.38,
+      "model_olasilik_%": 61.9,
+      "roi_%": 47.33,
+      "tutarlilik_%": 52.24,
+      "skor": "2-1 (%18.6)",
+      "iy_ms": "1/1 (%41.9)",
+      "alternatif_bahis": "Alt/Ust -> 2.5 Alt (2.45)",
+      "guven_notu": "A+",
+      "premium_skor": 0.5495
+    },
+    {
+      "lig": "Premier League",
+      "mac": "Aston Villa - Brighton and Hove Albion",
+      "tarih": "11.02.2026 22:30",
+      "onerilen_bahis": "Alt/Ust -> 2.5 Alt",
+      "oran": 2.16,
+      "model_olasilik_%": 65.58,
+      "roi_%": 41.66,
+      "tutarlilik_%": 53.58,
+      "skor": "1-0 (%23.2)",
+      "iy_ms": "X/X (%26.2)",
+      "alternatif_bahis": "Alt/Ust -> 2.5 Ust (1.99)",
+      "guven_notu": "A+",
+      "premium_skor": 0.5296
+    },
+    {
+      "lig": "Premier League",
+      "mac": "Sunderland - Liverpool",
+      "tarih": "11.02.2026 23:15",
+      "onerilen_bahis": "Alt/Ust -> 2.5 Alt",
+      "oran": 2.16,
+      "model_olasilik_%": 60.2,
+      "roi_%": 30.02,
+      "tutarlilik_%": 57.64,
+      "skor": "1-1 (%22.8)",
+      "iy_ms": "X/X (%27.6)",
+      "alternatif_bahis": "Alt/Ust -> 2.5 Ust (2.02)",
+      "guven_notu": "A+",
+      "premium_skor": 0.4777
+    },
+    {
+      "lig": "Serie A",
+      "mac": "Pisa - AC Milan",
+      "tarih": "13.02.2026 22:45",
+      "onerilen_bahis": "Alt/Ust -> 2.5 Alt",
+      "oran": 1.97,
+      "model_olasilik_%": 63.72,
+      "roi_%": 25.53,
+      "tutarlilik_%": 52.34,
+      "skor": "1-1 (%24.1)",
+      "iy_ms": "X/X (%26.6)",
+      "alternatif_bahis": "Alt/Ust -> 2.5 Ust (1.99)",
+      "guven_notu": "A+",
+      "premium_skor": 0.4487
+    },
+    {
+      "lig": "Premier League",
+      "mac": "Brentford - Arsenal",
+      "tarih": "12.02.2026 23:00",
+      "onerilen_bahis": "Alt/Ust -> 2.5 Alt",
+      "oran": 2.06,
+      "model_olasilik_%": 59.55,
+      "roi_%": 22.67,
+      "tutarlilik_%": 47.14,
+      "skor": "1-1 (%25.3)",
+      "iy_ms": "X/X (%25.8)",
+      "alternatif_bahis": "Alt/Ust -> 2.5 Ust (1.93)",
+      "guven_notu": "A",
+      "premium_skor": 0.4038
+    },
+    {
+      "lig": "Premier League",
+      "mac": "Crystal Palace - Burnley",
+      "tarih": "11.02.2026 22:30",
+      "onerilen_bahis": "Alt/Ust -> 2.5 Ust",
+      "oran": 1.96,
+      "model_olasilik_%": 63.24,
+      "roi_%": 23.95,
+      "tutarlilik_%": 33.01,
+      "skor": "2-1 (%23.2)",
+      "iy_ms": "1/1 (%35.1)",
+      "alternatif_bahis": "Alt/Ust -> 2.5 Alt (2.02)",
+      "guven_notu": "A",
+      "premium_skor": 0.3686
+    },
+    {
+      "lig": "Premier League",
+      "mac": "Nottingham Forest - Wolverhampton Wanderers",
+      "tarih": "11.02.2026 22:30",
+      "onerilen_bahis": "Alt/Ust -> 2.5 Alt",
+      "oran": 2.02,
+      "model_olasilik_%": 53.98,
+      "roi_%": 9.04,
+      "tutarlilik_%": 73.19,
+      "skor": "1-0 (%25.8)",
+      "iy_ms": "X/X (%31.2)",
+      "alternatif_bahis": "Mac Sonucu -> MS1 (1.75)",
+      "guven_notu": "A",
+      "premium_skor": 0.3557
+    }
+  ]
+}

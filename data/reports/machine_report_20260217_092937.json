@@ -1,0 +1,85 @@
+{
+  "created_at": "2026-02-17T09:29:37.334946+00:00",
+  "candidate_count": 15,
+  "profiles": [
+    {
+      "profile": "Yuksek Oran",
+      "legs": 0,
+      "total_odd": 1.0,
+      "hit_prob": 0.0,
+      "ev_mult": 0.0,
+      "roi_pct": -100.0
+    },
+    {
+      "profile": "Canavar Kupon",
+      "legs": 0,
+      "total_odd": 1.0,
+      "hit_prob": 0.0,
+      "ev_mult": 0.0,
+      "roi_pct": -100.0
+    },
+    {
+      "profile": "Altin Vurus",
+      "legs": 0,
+      "total_odd": 1.0,
+      "hit_prob": 0.0,
+      "ev_mult": 0.0,
+      "roi_pct": -100.0
+    }
+  ],
+  "settled_performance": {
+    "n": 268.0,
+    "hit_rate": 0.5149253731343284,
+    "avg_roi": 0.5334701492537314,
+    "avg_clv": 0.003673172322941009,
+    "score_mae": 2.5,
+    "iyms_hit_rate": 1.0
+  },
+  "premium_shortlist_top10": [
+    {
+      "lig": "Premier League",
+      "mac": "Wolverhampton Wanderers - Arsenal",
+      "tarih": "18.02.2026 23:00",
+      "onerilen_bahis": "Mac Sonucu -> MS1",
+      "oran": 13.0,
+      "model_olasilik_%": 22.51,
+      "roi_%": 192.64,
+      "tutarlilik_%": 21.29,
+      "skor": "1-0 (%41.6)",
+      "iy_ms": "1/1 (%54.7)",
+      "alternatif_bahis": "Alt/Ust -> 2.5 Alt (2.21)",
+      "guven_notu": "A+",
+      "premium_skor": 0.7573
+    },
+    {
+      "lig": "Serie A",
+      "mac": "AC Milan - Como",
+      "tarih": "18.02.2026 22:45",
+      "onerilen_bahis": "Mac Sonucu -> MS1",
+      "oran": 2.36,
+      "model_olasilik_%": 59.56,
+      "roi_%": 40.57,
+      "tutarlilik_%": 56.07,
+      "skor": "1-0 (%20.1)",
+      "iy_ms": "1/1 (%63.6)",
+      "alternatif_bahis": "Mac Sonucu -> MSX (3.45)",
+      "guven_notu": "A+",
+      "premium_skor": 0.5355
+    },
+    {
+      "lig": "La Liga",
+      "mac": "Levante - Villarreal",
+      "tarih": "18.02.2026 22:00",
+      "onerilen_bahis": "Mac Sonucu -> MSX",
+      "oran": 4.1,
+      "model_olasilik_%": 38.24,
+      "roi_%": 56.77,
+      "tutarlilik_%": 27.9,
+      "skor": "1-1 (%46.8)",
+      "iy_ms": "X/X (%65.2)",
+      "alternatif_bahis": "Alt/Ust -> 2.5 Alt (2.23)",
+      "guven_notu": "A+",
+      "premium_skor": 0.4545
+    }
+  ]
+}

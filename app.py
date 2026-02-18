@@ -37,6 +37,7 @@ class CouponProfile:
 
 BASE_ODDS = "https://api.the-odds-api.com/v4"
 BASE_FOOTBALL = "https://api.football-data.org/v4"
+BASE_API_FOOTBALL = "https://v3.football.api-sports.io"
 ODDS_MARKETS = ["h2h", "totals", "btts"]
 
 LEAGUES = {
@@ -47,6 +48,16 @@ LEAGUES = {
     "soccer_france_ligue_one": {"label": "Ligue 1", "fd_comp": "FL1"},
     "soccer_portugal_primeira_liga": {"label": "Primeira Liga", "fd_comp": "PPL"},
     "soccer_netherlands_eredivisie": {"label": "Eredivisie", "fd_comp": "DED"},
+}
+
+API_FOOTBALL_LEAGUE_IDS = {
+    "soccer_epl": 39,
+    "soccer_spain_la_liga": 140,
+    "soccer_italy_serie_a": 135,
+    "soccer_germany_bundesliga": 78,
+    "soccer_france_ligue_one": 61,
+    "soccer_portugal_primeira_liga": 94,
+    "soccer_netherlands_eredivisie": 88,
 }
 
 PROFILES = [
@@ -446,6 +457,46 @@ def summarize_conditioned_predictions(
     iyms_top3 = " | ".join([f"{k} %{v*100:.1f}" for k, v in sorted_iyms[:3]])
 
     return score_pred, iyms_pred, score_top3, iyms_top3, consistency_prob, score_pred_prob, iyms_pred_prob
+
+
+def coherence_score_for_pick(
+    market_key: str,
+    pick_text: str,
+    score_pred: str,
+    iyms_pred: str,
+    home: str,
+    away: str,
+) -> float:
+    score_h, score_a = parse_score_pred(score_pred)
+    if score_h is None or score_a is None:
+        return 0.5
+    score_outcome = match_outcome(score_h, score_a)
+    low = pick_text.lower()
+    score_ok = True
+    if market_key == "totals":
+        line = parse_pick_line(pick_text)
+        total = score_h + score_a
+        if "over" in low:
+            score_ok = total > line
+        elif "under" in low:
+            score_ok = total < line
+    elif market_key == "btts":
+        if "yes" in low:
+            score_ok = (score_h > 0 and score_a > 0)
+        elif "no" in low:
+            score_ok = (score_h == 0 or score_a == 0)
+    elif market_key == "h2h":
+        target = parse_h2h_pick_to_result(pick_text, home, away)
+        score_ok = (target == score_outcome) if target is not None else True
+    iyms_rhs_ok = True
+    if "/" in (iyms_pred or ""):
+        rhs = iyms_pred.split("/")[-1].strip().upper()
+        iyms_rhs_ok = rhs == score_outcome
+    if score_ok and iyms_rhs_ok:
+        return 1.0
+    if score_ok or iyms_rhs_ok:
+        return 0.55
+    return 0.08
 
 
 def safe_get(
@@ -913,6 +964,14 @@ def extract_candidates(
                     home=home,
                     away=away,
                 )
+                coherence_score = coherence_score_for_pick(
+                    market_key=market_key,
+                    pick_text=outcome_label,
+                    score_pred=score_pred,
+                    iyms_pred=iyms_pred,
+                    home=home,
+                    away=away,
+                )
                 market_prob = implied_prob(odd)
                 raw_model_prob = float(adjusted_probs[idx])
                 realism_score = clamp(
@@ -920,7 +979,7 @@ def extract_candidates(
                     0.0,
                     1.0,
                 )
-                model_prob = clamp(raw_model_prob * (0.75 + (0.25 * realism_score)), 0.01, 0.99)
+                model_prob = clamp(raw_model_prob * (0.70 + (0.22 * realism_score) + (0.08 * coherence_score)), 0.01, 0.99)
                 edge = model_prob - market_prob
                 books = int(bucket["book_count"][outcome_name])
                 roi = (model_prob * odd) - 1.0
@@ -938,6 +997,7 @@ def extract_candidates(
                     + (0.35 * roi)
                     + (0.30 * consistency_prob)
                     + (0.18 * realism_score)
+                    + (0.16 * coherence_score)
                     - (0.2 * risk)
                 )
                 candidates.append(
@@ -963,6 +1023,7 @@ def extract_candidates(
                         "risk": risk,
                         "consistency_prob": consistency_prob,
                         "realism_score": realism_score,
+                        "coherence_score": coherence_score,
                         "motivation_home": home_data.get("motivation", 0.5),
                         "motivation_away": away_data.get("motivation", 0.5),
                         "injury_risk_home": home_data.get("injury_risk_proxy", 0.2),
@@ -990,7 +1051,15 @@ def candidate_pool(
     quality_level: str = "Yuksek",
 ) -> List[dict]:
     if open_mode:
-        pool = [c for c in candidates if c["odd"] > 1.01 and c["bookmakers_count"] >= 1]
+        pool = [
+            c
+            for c in candidates
+            if c["odd"] > 1.01
+            and c["bookmakers_count"] >= 1
+            and c["consistency_prob"] >= 0.30
+            and c.get("realism_score", 0.0) >= 0.20
+            and c.get("coherence_score", 0.0) >= 0.55
+        ]
         pool = sorted(pool, key=lambda c: (c["value_score"], c["roi"], c["edge"]), reverse=True)
         return pool[:650]
 
@@ -1011,6 +1080,7 @@ def candidate_pool(
         and c["model_prob"] >= profile.min_prob
         and c["consistency_prob"] >= consistency_min
         and c["realism_score"] >= realism_min
+        and c["coherence_score"] >= 0.60
         and c["bookmakers_count"] >= profile.min_books
     ]
     return filtered[:260]
@@ -1033,6 +1103,7 @@ def relaxed_candidate_pool(
         and c["model_prob"] >= max(profile.min_prob * 0.70, 0.04)
         and c["consistency_prob"] >= 0.22
         and c["realism_score"] >= 0.16
+        and c["coherence_score"] >= 0.48
         and c["bookmakers_count"] >= 1
     ]
     return relaxed[:320]
@@ -1163,6 +1234,8 @@ def generate_coupon(
     for _ in range(iterations):
         leg_target = rng.randint(profile.min_legs, profile.max_legs)
         used_matches = set()
+        league_counts: Dict[str, int] = {}
+        market_counts: Dict[str, int] = {}
         picks: List[dict] = []
         total_odd = 1.0
 
@@ -1177,6 +1250,12 @@ def generate_coupon(
                 break
             if cand["match_id"] in used_matches:
                 continue
+            league_now = str(cand.get("league", ""))
+            market_now = str(cand.get("market_key", ""))
+            if league_counts.get(league_now, 0) >= 3:
+                continue
+            if market_counts.get(market_now, 0) >= max(2, leg_target // 3):
+                continue
             projected = total_odd * cand["odd"]
             remaining = max(leg_target - len(picks) - 1, 0)
             if remaining > 0:
@@ -1185,6 +1264,8 @@ def generate_coupon(
                     continue
             picks.append(cand)
             used_matches.add(cand["match_id"])
+            league_counts[league_now] = league_counts.get(league_now, 0) + 1
+            market_counts[market_now] = market_counts.get(market_now, 0) + 1
             total_odd = projected
             if total_odd > profile.target_max * 2.5:
                 break
@@ -1996,6 +2077,114 @@ def apply_score_quality_factors(candidates: List[dict], factors: Dict[str, float
         ) * fx
 
 
+def load_league_reliability_factors(db_path: Path, played_only: bool = True) -> Dict[str, float]:
+    if not db_path.exists():
+        return {}
+    conn = sqlite3.connect(db_path)
+    filter_sql = "AND is_played = 1" if played_only else ""
+    rows = conn.execute(
+        """
+        SELECT league, COUNT(*) AS n,
+               AVG(CASE WHEN won = 1 THEN 1.0 ELSE 0.0 END) AS hit_rate,
+               AVG(CASE WHEN won = 1 THEN odd_open - 1.0 ELSE -1.0 END) AS avg_roi
+        FROM bet_legs
+        WHERE settled = 1
+        """
+        + f" {filter_sql}"
+        + """
+        GROUP BY league
+        """
+    ).fetchall()
+    if played_only and sum(int(r[1] or 0) for r in rows) < 80:
+        rows = conn.execute(
+            """
+            SELECT league, COUNT(*) AS n,
+                   AVG(CASE WHEN won = 1 THEN 1.0 ELSE 0.0 END) AS hit_rate,
+                   AVG(CASE WHEN won = 1 THEN odd_open - 1.0 ELSE -1.0 END) AS avg_roi
+            FROM bet_legs
+            WHERE settled = 1
+            GROUP BY league
+            """
+        ).fetchall()
+    conn.close()
+    out: Dict[str, float] = {}
+    total_n = sum(int(r[1] or 0) for r in rows)
+    if total_n < 40:
+        return out
+    baseline_hit = sum(float(r[2] or 0.0) * int(r[1] or 0) for r in rows) / max(total_n, 1)
+    baseline_roi = sum(float(r[3] or 0.0) * int(r[1] or 0) for r in rows) / max(total_n, 1)
+    for league, n, hit_rate, avg_roi in rows:
+        n_i = int(n or 0)
+        if n_i < 8:
+            continue
+        hit = float(hit_rate or 0.0)
+        roi = float(avg_roi or 0.0)
+        sample_adj = clamp(0.92 + min(n_i, 100) / 500.0, 0.92, 1.12)
+        fx = (1.0 + (0.70 * (hit - baseline_hit)) + (0.22 * (roi - baseline_roi))) * sample_adj
+        out[str(league)] = clamp(float(fx), 0.86, 1.16)
+    return out
+
+
+def apply_league_reliability_factors(candidates: List[dict], factors: Dict[str, float]) -> None:
+    if not candidates or not factors:
+        return
+    for c in candidates:
+        fx = float(factors.get(str(c.get("league", "")), 1.0))
+        c["league_factor"] = fx
+        c["confidence"] = clamp(c["confidence"] * (0.95 + (0.05 * fx)), 0.0, 1.0)
+        c["risk"] = clamp(1.0 - c["confidence"] + (0.45 / max(c["odd"], 1.2)), 0.0, 1.0)
+        c["value_score"] = (
+            (c["edge"] * math.log(max(c["odd"], 1.1)) * math.sqrt(max(c["bookmakers_count"], 1)))
+            + (0.35 * c["roi"])
+            + (0.30 * c["consistency_prob"])
+            + (0.18 * c.get("realism_score", 0.0))
+            - (0.2 * c["risk"])
+        ) * fx
+
+
+def walk_forward_backtest_summary(db_path: Path, played_only: bool = True, windows: int = 6) -> pd.DataFrame:
+    if not db_path.exists():
+        return pd.DataFrame()
+    conn = sqlite3.connect(db_path)
+    filter_sql = "AND is_played = 1" if played_only else ""
+    rows = conn.execute(
+        """
+        SELECT created_at, model_prob, odd_open, won
+        FROM bet_legs
+        WHERE settled = 1 AND model_prob > 0 AND odd_open > 1.01
+        """
+        + f" {filter_sql}"
+        + """
+        ORDER BY datetime(created_at) ASC, id ASC
+        """
+    ).fetchall()
+    conn.close()
+    if len(rows) < 80:
+        return pd.DataFrame()
+    chunk = max(20, len(rows) // max(windows, 1))
+    out_rows: List[Dict[str, Any]] = []
+    for i in range(0, len(rows), chunk):
+        seg = rows[i : i + chunk]
+        if len(seg) < 20:
+            continue
+        probs = np.array([float(r[1]) for r in seg], dtype=float)
+        odds = np.array([float(r[2]) for r in seg], dtype=float)
+        won = np.array([float(r[3]) for r in seg], dtype=float)
+        brier = float(np.mean((probs - won) ** 2))
+        roi = float(np.mean(np.where(won > 0.5, odds - 1.0, -1.0)))
+        hit = float(np.mean(won))
+        out_rows.append(
+            {
+                "Pencere": len(out_rows) + 1,
+                "Ornek": int(len(seg)),
+                "Hit %": round(hit * 100.0, 2),
+                "ROI %": round(roi * 100.0, 2),
+                "Brier": round(brier, 4),
+            }
+        )
+    return pd.DataFrame(out_rows)
+
+
 def render_coupon_panel(profile: CouponProfile, picks: List[dict], total_odd: float, metrics: Dict[str, float]) -> None:
     st.subheader(f"{profile.title}")
     st.caption(f"Hedef Oran: {profile.target_min:,.0f} - {profile.target_max:,.0f}")
@@ -2089,6 +2278,7 @@ def build_visuals(candidates: List[dict]) -> None:
                 "roi",
                 "consistency_prob",
                 "realism_score",
+                "coherence_score",
                 "motivation_home",
                 "motivation_away",
                 "days_rest_home",
@@ -2112,6 +2302,7 @@ def build_visuals(candidates: List[dict]) -> None:
     show["roi"] = (show["roi"] * 100.0).round(3)
     show["consistency_prob"] = (show["consistency_prob"] * 100.0).round(3)
     show["realism_score"] = (show["realism_score"] * 100.0).round(3)
+    show["coherence_score"] = (show["coherence_score"] * 100.0).round(3)
     show["motivation_home"] = (show["motivation_home"] * 100.0).round(1)
     show["motivation_away"] = (show["motivation_away"] * 100.0).round(1)
     show["injury_risk_home"] = (show["injury_risk_home"] * 100.0).round(1)
@@ -2485,6 +2676,58 @@ def fetch_injury_csv_from_url(csv_url: str, timeout_sec: int = 12) -> Tuple[Dict
     return out, None
 
 
+def current_season_year(now_utc: Optional[datetime] = None) -> int:
+    now_utc = now_utc or datetime.now(timezone.utc)
+    # European football season heuristic.
+    return now_utc.year if now_utc.month >= 7 else now_utc.year - 1
+
+
+def fetch_api_football_injuries(
+    api_key: str,
+    sport_keys: List[str],
+    per_league_limit: int = 200,
+) -> Tuple[Dict[str, float], Optional[str]]:
+    if not api_key.strip():
+        return {}, None
+    headers = {"x-apisports-key": api_key.strip()}
+    season = current_season_year()
+    injury_counts: Dict[str, int] = {}
+
+    for sk in sport_keys:
+        league_id = API_FOOTBALL_LEAGUE_IDS.get(sk)
+        if not league_id:
+            continue
+        try:
+            response = requests.get(
+                f"{BASE_API_FOOTBALL}/injuries",
+                headers=headers,
+                params={"league": league_id, "season": season},
+                timeout=20,
+            )
+        except Exception as exc:
+            return {}, f"API-Football baglanti hatasi: {exc}"
+        if response.status_code != 200:
+            return {}, f"API-Football HTTP hatasi: {response.status_code}"
+        try:
+            payload = response.json()
+        except Exception:
+            return {}, "API-Football JSON okunamadi."
+        rows = payload.get("response", []) or []
+        for row in rows[:per_league_limit]:
+            team_name = ((row.get("team") or {}).get("name") or "").strip()
+            if not team_name:
+                continue
+            key = normalize_team_name(team_name)
+            injury_counts[key] = injury_counts.get(key, 0) + 1
+        time.sleep(0.12)
+
+    out: Dict[str, float] = {}
+    for team_key, count in injury_counts.items():
+        # Keep influence moderate to avoid overfitting from noisy injury feeds.
+        out[team_key] = clamp(float(count) * 0.022, 0.0, 0.35)
+    return out, None
+
+
 def generate_daily_report(
     db_path: Path,
     candidates: List[dict],
@@ -2530,6 +2773,7 @@ def run_coupon_engine(
     db_path: Path,
     odds_key: str,
     football_key: str,
+    api_football_key: str,
     region: str,
     leagues: List[str],
     days: int = 3,
@@ -2572,13 +2816,20 @@ def run_coupon_engine(
             )
         settled_now = settle_open_legs(db_path, football_key, leagues)
 
-    candidates = extract_candidates(odds_events, standings, team_contexts, injury_adjustments or {})
+    auto_inj = {}
+    if api_football_key.strip():
+        auto_inj, _ = fetch_api_football_injuries(api_football_key, leagues)
+    merged_inj = dict(auto_inj)
+    merged_inj.update(injury_adjustments or {})
+    candidates = extract_candidates(odds_events, standings, team_contexts, merged_inj)
     calib_bins = load_calibration_bins(db_path, bins=10)
     apply_calibration_to_candidates(candidates, calib_bins)
     adaptive_weights = recompute_adaptive_weights(db_path, min_settled=120)
     apply_adaptive_weights(candidates, adaptive_weights)
     score_quality_factors = load_score_quality_factors(db_path, played_only=True)
     apply_score_quality_factors(candidates, score_quality_factors)
+    league_factors = load_league_reliability_factors(db_path, played_only=True)
+    apply_league_reliability_factors(candidates, league_factors)
     candidates.sort(key=lambda c: (c["value_score"], c["edge"], c["odd"]), reverse=True)
     if not candidates:
         raise RuntimeError("Model filtrelerinden gecen aday secim bulunamadi.")
@@ -2632,6 +2883,7 @@ def main() -> None:
 
     odds_key_env = os.getenv("ODDS_API_KEY", "").strip()
     football_key_env = os.getenv("FOOTBALL_DATA_API_KEY", "").strip()
+    api_football_key_env = os.getenv("API_FOOTBALL_KEY", "").strip()
     injury_csv_url_env = os.getenv("INJURY_CSV_URL", "").strip()
     require_user_keys = os.getenv("REQUIRE_USER_KEYS", "true").strip().lower() == "true"
     default_region = os.getenv("REGION", "eu").strip()
@@ -2639,6 +2891,7 @@ def main() -> None:
     init_db(db_path)
     odds_key = ""
     football_key = ""
+    api_football_key = ""
 
     with st.sidebar:
         st.header("Motor Ayarlari")
@@ -2647,17 +2900,21 @@ def main() -> None:
         with st.expander("Key nereden alinir?"):
             st.markdown("1. The Odds API key al: [the-odds-api.com](https://the-odds-api.com)")
             st.markdown("2. Football-Data key al: [football-data.org/client/register](https://www.football-data.org/client/register)")
-            st.markdown("3. Aldigin keyleri asagidaki kutulara yapistir.")
+            st.markdown("3. Opsiyonel API-Football key al: [api-football.com](https://www.api-football.com)")
+            st.markdown("4. Aldigin keyleri asagidaki kutulara yapistir.")
 
         odds_key_input = st.text_input("The Odds API Key", value="", type="password", placeholder="odds key buraya")
         football_key_input = st.text_input("Football-Data API Key", value="", type="password", placeholder="football-data key buraya")
+        api_football_key_input = st.text_input("API-Football Key (opsiyonel)", value="", type="password", placeholder="api-football key buraya")
 
         if require_user_keys:
             odds_key = odds_key_input.strip()
             football_key = football_key_input.strip()
+            api_football_key = api_football_key_input.strip()
         else:
             odds_key = odds_key_input.strip() or odds_key_env
             football_key = football_key_input.strip() or football_key_env
+            api_football_key = api_football_key_input.strip() or api_football_key_env
 
         if not odds_key:
             st.error("The Odds API key gerekli. Kutuga yapistir.")
@@ -2690,6 +2947,7 @@ def main() -> None:
         st.caption("Not: Kisitsiz mod acikken daha fazla market kombinasyonu analiz edilir.")
         st.divider()
         st.subheader("Ek Veri")
+        use_api_football_injuries = st.toggle("API-Football sakatliklarini otomatik cek", value=bool(api_football_key))
         injury_file = st.file_uploader("Sakatlik CSV (team,missing_count)", type=["csv"], accept_multiple_files=False)
         injury_csv_url = st.text_input(
             "Sakatlik CSV URL (opsiyonel)",
@@ -2741,6 +2999,14 @@ def main() -> None:
             st.warning(f"Football-data katmani hata verdi: {exc}. Sadece odds modeliyle devam ediliyor.")
 
     injury_adjustments: Dict[str, float] = {}
+    if use_api_football_injuries and api_football_key.strip():
+        api_inj, api_err = fetch_api_football_injuries(api_football_key, leagues)
+        if api_err:
+            st.warning(api_err)
+        elif api_inj:
+            injury_adjustments.update(api_inj)
+            st.caption(f"API-Football'dan {len(api_inj)} takim icin sakatlik etkisi yuklendi.")
+
     if use_injury_url and injury_csv_url.strip():
         url_adjustments, url_err = fetch_injury_csv_from_url(injury_csv_url)
         if url_err:
@@ -2761,6 +3027,8 @@ def main() -> None:
     apply_adaptive_weights(candidates, adaptive_weights)
     score_quality_factors = load_score_quality_factors(db_path, played_only=True)
     apply_score_quality_factors(candidates, score_quality_factors)
+    league_factors = load_league_reliability_factors(db_path, played_only=True)
+    apply_league_reliability_factors(candidates, league_factors)
     candidates.sort(key=lambda c: (c["value_score"], c["edge"], c["odd"]), reverse=True)
     if not candidates:
         st.warning("Model filtrelerinden gecen aday secim bulunamadi.")
@@ -2924,6 +3192,14 @@ def main() -> None:
             f"Model havuzu (tum oneriler): {int(perf_all['n'])} leg | hit %{perf_all['hit_rate']*100:.2f} | "
             f"ROI %{perf_all['avg_roi']*100:.2f} | skor hata {perf_all['score_mae']:.2f} | IY/MS %{perf_all['iyms_hit_rate']*100:.2f}"
         )
+        st.divider()
+        st.subheader("Walk-Forward Backtest")
+        wf = walk_forward_backtest_summary(db_path, played_only=True, windows=6)
+        if wf.empty:
+            st.caption("Walk-forward backtest icin yeterli oynanan settled veri yok (en az ~80 leg).")
+        else:
+            st.dataframe(wf, use_container_width=True, height=220)
+            st.caption("Daha dusuk Brier ve daha stabil ROI, modelin daha saglikli oldugunu gosterir.")
         if calib_bins:
             cal_df = pd.DataFrame(
                 [{"bin_alt": b[0], "pred_ort": b[1], "gercek_ort": b[2]} for b in calib_bins]
